@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Phishing Detection</title>
+</head>
+<body>
+    <h1>Phishing Detection</h1>
+    <form method="POST">
+        <textarea name="text" rows="5" cols="40" placeholder="Enter text for analysis"></textarea>
+        <br>
+        <button type="submit">Analyze</button>
+    </form>
+
+    {% if bert_result %}
+        <h2>BERT:</h2>
+        <p><strong>Label:</strong> {{ bert_result.label }}</p>
+        <p><strong>Score:</strong> {{ bert_result.score }}</p>
+    {% endif %}
+
+    {% if llama_result %}
+        <h2>Llama Phishsense:</h2>
+        <p><strong>Prediction:</strong> {{ llama_result.prediction }}</p>
+    {% endif %}
+</body>
+</html>
