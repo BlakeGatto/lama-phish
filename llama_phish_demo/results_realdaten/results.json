@@ -1,0 +1,21 @@
+{
+    "metrics": {
+        "accuracy": 0.525,
+        "precision": 0.5128205128205128,
+        "recall": 1.0,
+        "f1": 0.6779661016949152,
+        "roc_auc": 0.525
+    },
+    "confusion_matrix": [
+        [
+            1,
+            19
+        ],
+        [
+            0,
+            20
+        ]
+    ],
+    "timestamp": "20241208_190443",
+    "num_samples": 40
+}

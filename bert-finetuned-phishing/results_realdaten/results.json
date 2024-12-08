@@ -1,0 +1,22 @@
+{
+    "model_name": "ealvaradob/bert-finetuned-phishing",
+    "timestamp": "2024-12-08T18:58:15.355170",
+    "dataset": {
+        "total_emails": 40,
+        "valid_emails": 20,
+        "phishing_emails": 20
+    },
+    "metrics": {
+        "accuracy": 0.55,
+        "precision": 0.5263157894736842,
+        "recall": 1.0,
+        "f1_score": 0.6896551724137931,
+        "roc_auc": 0.6400000000000001
+    },
+    "confusion_matrix": {
+        "true_negatives": 2,
+        "false_positives": 18,
+        "false_negatives": 0,
+        "true_positives": 20
+    }
+}

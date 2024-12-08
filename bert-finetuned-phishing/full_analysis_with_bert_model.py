@@ -1,197 +1,222 @@
+from pathlib import Path
+from typing import List, Dict, Any, Union, Tuple
+import logging
+from dataclasses import dataclass
+import torch
 from transformers import pipeline
 import json
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, 
+                           f1_score, confusion_matrix, roc_auc_score, roc_curve)
 from datetime import datetime
 
-classifier = pipeline("text-classification", model="ealvaradob/bert-finetuned-phishing")
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                   format='%(asctime)s - %(levelname)s - %(message)s')
 
-# paths to the valid and phishing emails JSONL files
-valid_mails_path = '../examples/valid_mails.jsonl'
-phishing_mails_path = '../examples/phishing_mails.jsonl'
+@dataclass
+class Config:
+    model_name: str = "ealvaradob/bert-finetuned-phishing"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    batch_size: int = 32
+    valid_mails_path: Path = Path('../examples/valid_mails.jsonl')
+    phishing_mails_path: Path = Path('../examples/phishing_mails.jsonl')
 
-def load_emails(file_path):
-    emails = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('//'):
-                continue
-            emails.append(json.loads(line))
-    return emails
+class PhishingDetector:
+    def __init__(self, config: Config):
+        self.config = config
+        self.label_mapping = {'benign': 'valid', 'phishing': 'phishing'}
+        try:
+            self.classifier = pipeline(
+                "text-classification", 
+                model=config.model_name,
+                device=config.device,
+                batch_size=config.batch_size
+            )
+            logging.info(f"Model loaded successfully on {config.device}")
+        except Exception as e:
+            logging.error(f"Failed to load model: {e}")
+            raise
 
-# load mails and combine "/examples/valid_mails.jsonl" and "/examples/phishing_mails.jsonl"
-emails = load_emails(valid_mails_path) + load_emails(phishing_mails_path)
+    def load_emails(self) -> List[Dict[str, Any]]:
+        """Load and combine valid and phishing emails."""
+        emails = []
+        for path in [self.config.valid_mails_path, self.config.phishing_mails_path]:
+            try:
+                with path.open('r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('//'):
+                            try:
+                                emails.append(json.loads(line))
+                            except json.JSONDecodeError as e:
+                                logging.warning(f"Skipping invalid line: {line}")
+                                continue  # Skip invalid lines
+                logging.info(f"Loaded {len(emails)} emails from {path}")
+            except Exception as e:
+                logging.error(f"Error loading emails from {path}: {e}")
+                raise
+        return emails
 
-# classify the emails with the model and collect the results
-correct_predictions = 0
-total_emails = len(emails)
+    def predict_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
+        """Make predictions in batches."""
+        return self.classifier(texts, truncation=True)
 
-# var decalration to store the true labels and predictions
-true_labels = []
-predicted_labels = []
-predicted_probs = []
+    def evaluate(self, emails: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Evaluate model performance and generate metrics."""
+        texts = [email['content'] for email in emails]
+        true_labels = []
+        predicted_labels = []
+        predicted_probs = []
 
-# map the model labels to 'valid' and 'phishing' from the json files
-label_mapping = {'benign': 'valid', 'phishing': 'phishing'}
+        for i in range(0, len(texts), self.config.batch_size):
+            batch_texts = texts[i:i + self.config.batch_size]
+            predictions = self.predict_batch(batch_texts)
+            
+            for j, pred in enumerate(predictions):
+                email = emails[i + j]
+                predicted_label = self.label_mapping[pred['label']]
+                true_label = email['email_type']
+                
+                true_labels.append(1 if true_label == 'phishing' else 0)
+                predicted_labels.append(1 if predicted_label == 'phishing' else 0)
+                predicted_probs.append(pred['score'] if predicted_label == 'phishing' 
+                                    else 1 - pred['score'])
 
-for email in emails:
-    text = email['content']
-    prediction = classifier(text)[0]
-    predicted_label = label_mapping[prediction['label']]
-    true_label = email['email_type']
-    # labels to binary values: 'phishing' = 1, 'valid' = 0
-    true_labels.append(1 if true_label == 'phishing' else 0)
-    predicted_labels.append(1 if predicted_label == 'phishing' else 0)
-    predicted_probs.append(prediction['score'] if predicted_label == 'phishing' else 1 - prediction['score'])
-    if predicted_label == true_label:
-        correct_predictions += 1
+        metrics = self.calculate_metrics(true_labels, predicted_labels, predicted_probs)
+        results = self.generate_results_dict(emails, true_labels, predicted_labels, 
+                                          predicted_probs, metrics['conf_matrix'])
+        return metrics, results
 
-# use sklearn to calculate the metrics such as 
-# accuracy, precision, recall, f1 score, confusion matrix and roc auc score
-accuracy = accuracy_score(true_labels, predicted_labels)
-precision = precision_score(true_labels, predicted_labels)
-recall = recall_score(true_labels, predicted_labels)
-f1 = f1_score(true_labels, predicted_labels)
-conf_matrix = confusion_matrix(true_labels, predicted_labels)
-roc_auc = roc_auc_score(true_labels, predicted_probs)
-
-def generate_results_dict(emails, true_labels, predicted_labels, predicted_probs, conf_matrix, output_dir):
-    results = {
-        "model_name": "bert-finetuned-phishing",
-        "timestamp": datetime.now().isoformat(),
-        "dataset": {
-            "total_emails": len(emails),
-            "valid_emails": sum(1 for label in true_labels if label == 0),
-            "phishing_emails": sum(1 for label in true_labels if label == 1)
-        },
-        "metrics": {
-            "accuracy": float(accuracy_score(true_labels, predicted_labels)),
-            "precision": float(precision_score(true_labels, predicted_labels)),
-            "recall": float(recall_score(true_labels, predicted_labels)),
-            "f1_score": float(f1_score(true_labels, predicted_labels)),
-            "roc_auc": float(roc_auc_score(true_labels, predicted_probs))
-        },
-        "confusion_matrix": {
-            "true_negatives": int(conf_matrix[0][0]),
-            "false_positives": int(conf_matrix[0][1]),
-            "false_negatives": int(conf_matrix[1][0]),
-            "true_positives": int(conf_matrix[1][1])
-        },
-        "output_files": {
-            "confusion_matrix_plot": f"{output_dir}/confusion_matrix.png",
-            "roc_curve_plot": f"{output_dir}/roc_curve.png",
-            "report_file": f"{output_dir}/report.txt"
+    def calculate_metrics(self, true_labels: List[int], predicted_labels: List[int], 
+                         predicted_probs: List[float]) -> Dict[str, Any]:
+        """Calculate all evaluation metrics."""
+        return {
+            "accuracy": accuracy_score(true_labels, predicted_labels),
+            "precision": precision_score(true_labels, predicted_labels),
+            "recall": recall_score(true_labels, predicted_labels),
+            "f1": f1_score(true_labels, predicted_labels),
+            "conf_matrix": confusion_matrix(true_labels, predicted_labels),
+            "roc_auc": roc_auc_score(true_labels, predicted_probs),
+            "true_labels": true_labels,
+            "predicted_labels": predicted_labels,
+            "predicted_probs": predicted_probs
         }
-    }
-    return results
 
-# Create output directory for results
-output_dir = f'results_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-import os
-os.makedirs(output_dir, exist_ok=True)
+    def generate_results_dict(self, emails: List[Dict[str, Any]], true_labels: List[int],
+                            predicted_labels: List[int], predicted_probs: List[float],
+                            conf_matrix: np.ndarray) -> Dict[str, Any]:
+        """Generate structured results dictionary."""
+        return {
+            "model_name": self.config.model_name,
+            "timestamp": datetime.now().isoformat(),
+            "dataset": {
+                "total_emails": len(emails),
+                "valid_emails": sum(1 for label in true_labels if label == 0),
+                "phishing_emails": sum(1 for label in true_labels if label == 1)
+            },
+            "metrics": {
+                "accuracy": float(accuracy_score(true_labels, predicted_labels)),
+                "precision": float(precision_score(true_labels, predicted_labels)),
+                "recall": float(recall_score(true_labels, predicted_labels)),
+                "f1_score": float(f1_score(true_labels, predicted_labels)),
+                "roc_auc": float(roc_auc_score(true_labels, predicted_probs))
+            },
+            "confusion_matrix": {
+                "true_negatives": int(conf_matrix[0][0]),
+                "false_positives": int(conf_matrix[0][1]),
+                "false_negatives": int(conf_matrix[1][0]),
+                "true_positives": int(conf_matrix[1][1])
+            }
+        }
 
-# use the calculated metrics to display the accuracy
-# such as the total emails, correct predictions and accuracy
-accuracy = correct_predictions / total_emails * 100
-print(f"Total emails: {total_emails}")
-print(f"Correct predictions: {correct_predictions}")
-print(f"Accuracy: {accuracy:.2f}%")
+class Visualizer:
+    @staticmethod
+    def save_visualizations(metrics: Dict[str, Any], output_dir: Path) -> None:
+        """Generate and save all visualizations."""
+        output_dir.mkdir(exist_ok=True)
+        
+        # Confusion Matrix
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(metrics['conf_matrix'], annot=True, fmt='d', cmap='Blues',
+                   xticklabels=['Valid', 'Phishing'],
+                   yticklabels=['Valid', 'Phishing'])
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.savefig(output_dir / 'confusion_matrix.png')
+        plt.close()
 
-# print the results
-print(f"Accuracy: {accuracy:.2%}")
-print(f"Precision: {precision:.2%}")
-print(f"Recall: {recall:.2%}")
-print(f"F1-Score: {f1:.2%}")
-print("Confusion Matrix:")
-print(conf_matrix)
-print(f"ROC-AUC: {roc_auc:.2f}")
+        # ROC Curve
+        fpr, tpr, _ = roc_curve(metrics['true_labels'], metrics['predicted_probs'])
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, 
+                label=f'ROC curve (AUC = {metrics["roc_auc"]:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve')
+        plt.legend(loc="lower right")
+        plt.savefig(output_dir / 'roc_curve.png')
+        plt.close()
 
-# After calculating metrics and before visualization
-results = generate_results_dict(emails, true_labels, predicted_labels, predicted_probs, conf_matrix, output_dir)
+def main():
+    config = Config()
+    output_dir = Path(f'results_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+    
+    try:
+        detector = PhishingDetector(config)
+        emails = detector.load_emails()
+        metrics, results = detector.evaluate(emails)
+        
+        # Save results and visualizations
+        output_dir.mkdir(exist_ok=True)
+        with open(output_dir / 'results.json', 'w') as f:
+            json.dump(results, f, indent=4)
+            
+        Visualizer.save_visualizations(metrics, output_dir)
 
-# Save results as JSON
-with open(f'{output_dir}/results.json', 'w') as f:
-    json.dump(results, f, indent=4)
+        # Generate and save report
+        report = f"""
+        Phishing Detection Model Evaluation Report
+        ========================================
+        Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-# Visualize Confusion Matrix
-plt.figure(figsize=(8, 6))
-sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-            xticklabels=['Valid', 'Phishing'],
-            yticklabels=['Valid', 'Phishing'])
-plt.title('Confusion Matrix')
-plt.ylabel('True Label')
-plt.xlabel('Predicted Label')
-plt.savefig(f'{output_dir}/confusion_matrix.png')
-plt.close()
+        Dataset Overview:
+        ----------------
+        Total emails analyzed: {len(emails)}
+        Valid emails: {results['dataset']['valid_emails']}
+        Phishing emails: {results['dataset']['phishing_emails']}
 
-# Plot ROC Curve
-fpr, tpr, _ = roc_curve(true_labels, predicted_probs)
-plt.figure(figsize=(8, 6))
-plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
-plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-plt.xlim([0.0, 1.0])
-plt.ylim([0.0, 1.05])
-plt.xlabel('False Positive Rate')
-plt.ylabel('True Positive Rate')
-plt.title('Receiver Operating Characteristic (ROC) Curve')
-plt.legend(loc="lower right")
-plt.savefig(f'{output_dir}/roc_curve.png')
-plt.close()
+        Performance Metrics:
+        ------------------
+        Accuracy: {results['metrics']['accuracy']:.2%}
+        Precision: {results['metrics']['precision']:.2%}
+        Recall: {results['metrics']['recall']:.2%}
+        F1-Score: {results['metrics']['f1_score']:.2%}
+        ROC-AUC: {results['metrics']['roc_auc']:.2f}
 
-# Generate detailed report
-report = f"""
-Phishing Detection Model Evaluation Report
-========================================
-Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        Confusion Matrix:
+        ---------------
+        True Negatives: {results['confusion_matrix']['true_negatives']}
+        False Positives: {results['confusion_matrix']['false_positives']}
+        False Negatives: {results['confusion_matrix']['false_negatives']}
+        True Positives: {results['confusion_matrix']['true_positives']}
+        """
 
-Dataset Overview:
-----------------
-Total emails analyzed: {total_emails}
-Correct predictions: {correct_predictions}
+        with open(output_dir / 'report.txt', 'w') as f:
+            f.write(report)
 
-Performance Metrics:
-------------------
-Accuracy: {accuracy:.2f}% 
--> This means the model correctly classified {accuracy:.2f}% of all emails.
+        print(report)
+        logging.info(f"Results saved to {output_dir}")
 
-Precision: {precision:.2%}
--> Out of all emails flagged as phishing, {precision:.2%} were actually phishing.
+    except Exception as e:
+        logging.error(f"Error during execution: {e}")
+        raise
 
-Recall: {recall:.2%}
--> The model successfully identified {recall:.2%} of all actual phishing emails.
-
-F1-Score: {f1:.2%}
--> This is the harmonic mean of precision and recall, indicating overall performance.
-
-ROC-AUC: {roc_auc:.2f}
--> A score close to 1.0 indicates excellent classification performance.
-
-Confusion Matrix Interpretation:
------------------------------
-True Negatives (Valid emails correctly identified): {conf_matrix[0][0]}
-False Positives (Valid emails incorrectly flagged as phishing): {conf_matrix[0][1]}
-False Negatives (Phishing emails missed): {conf_matrix[1][0]}
-True Positives (Phishing emails correctly identified): {conf_matrix[1][1]}
-
-Key Insights:
------------
-1. False Positive Rate: {conf_matrix[0][1]/(conf_matrix[0][0] + conf_matrix[0][1]):.2%}
-   -> This represents legitimate emails incorrectly marked as phishing
-2. False Negative Rate: {conf_matrix[1][0]/(conf_matrix[1][0] + conf_matrix[1][1]):.2%}
-   -> This represents phishing emails that went undetected
-
-Visualizations saved:
--------------------
-- Confusion Matrix: {output_dir}/confusion_matrix.png
-- ROC Curve: {output_dir}/roc_curve.png
-"""
-
-# Save report
-with open(f'{output_dir}/report.txt', 'w') as f:
-    f.write(report)
-
-# Print report to console
-print(report)
+if __name__ == "__main__":
+    main()

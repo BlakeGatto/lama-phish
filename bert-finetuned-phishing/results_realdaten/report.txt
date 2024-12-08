@@ -1,0 +1,26 @@
+
+        Phishing Detection Model Evaluation Report
+        ========================================
+        Generated on: 2024-12-08 18:58:15
+
+        Dataset Overview:
+        ----------------
+        Total emails analyzed: 40
+        Valid emails: 20
+        Phishing emails: 20
+
+        Performance Metrics:
+        ------------------
+        Accuracy: 55.00%
+        Precision: 52.63%
+        Recall: 100.00%
+        F1-Score: 68.97%
+        ROC-AUC: 0.64
+
+        Confusion Matrix:
+        ---------------
+        True Negatives: 2
+        False Positives: 18
+        False Negatives: 0
+        True Positives: 20
+        
