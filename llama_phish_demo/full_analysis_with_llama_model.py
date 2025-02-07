@@ -104,18 +104,15 @@ def compute_candidate_logprob(model, tokenizer, prompt, candidate):
 def predict_single_email(model, tokenizer, text):
     """Make prediction for a single email by extracting probabilities from a causal LM"""
     prompt = f"""
-Task: Phishing Detection Classification
+You are a specialized phishing detection model. Analyze the following email content and determine if it is a phishing attempt.
 
-Instructions:
+TASK:
+Classify the email content as either phishing (TRUE) or legitimate (FALSE).
 
-* Read the text provided below.
-* Determine whether the text is a phishing attempt. Consider whether it contains indicators such as urgent requests for sensitive information, suspicious links, impersonation of trusted sources, or other common phishing characteristics.
-* Respond with "TRUE" if the text is identified as a phishing attempt, or "FALSE" if it is not.
-Text:
+EMAIL CONTENT: 
 {text}
-Answer:
 
-"""
+ANSWER (TRUE/FALSE):"""
     # Compute log-likelihood for each candidate
     logp_true = compute_candidate_logprob(model, tokenizer, prompt, "TRUE")
     logp_false = compute_candidate_logprob(model, tokenizer, prompt, "FALSE")
