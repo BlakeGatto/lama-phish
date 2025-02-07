@@ -36,9 +36,9 @@ def load_model_and_tokenizer():
     """Load model with proper error handling"""
     try:
         logger.info("Loading model and tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained("AcuteShrewdSecurity/Llama-SecuritySense-1B")
-        base_model = AutoModelForCausalLM.from_pretrained("AcuteShrewdSecurity/Llama-SecuritySense-1B")
-        model = PeftModel.from_pretrained(base_model, "AcuteShrewdSecurity/Llama-SecuritySense-1B")
+        tokenizer = AutoTokenizer.from_pretrained("AcuteShrewdSecurity/Llama-PhishSense-1B")
+        base_model = AutoModelForCausalLM.from_pretrained("AcuteShrewdSecurity/Llama-PhishSense-1B")
+        model = PeftModel.from_pretrained(base_model, "AcuteShrewdSecurity/Llama-PhishSense-1B")
         
         if torch.cuda.is_available():
             model = model.to('cuda')
