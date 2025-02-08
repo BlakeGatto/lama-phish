@@ -10,6 +10,8 @@ from datetime import datetime
 import os
 import logging
 from tqdm import tqdm
+from huggingface_hub import login  # Import the login function
+import math
 
 # Setup logging
 logging.basicConfig(
@@ -17,6 +19,18 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def login_hugging_face():
+    """Login to Hugging Face using a token from environment or prompt the user."""
+    try:
+        token = # Insert Token Here
+        if token is None:
+            token = input("Please enter your Hugging Face token: ")
+        login(token=token)
+        logger.info("Successfully logged in to Hugging Face")
+    except Exception as e:
+        logger.error(f"Failed to login to Hugging Face: {str(e)}")
+        raise
 
 def load_model_and_tokenizer():
     """Load model with proper error handling"""
@@ -55,8 +69,40 @@ def load_emails(file_path):
         logger.error(f"Error loading emails from {file_path}: {str(e)}")
         raise
 
+def compute_candidate_logprob(model, tokenizer, prompt, candidate):
+    """
+    Compute the log-likelihood of a candidate answer given the prompt.
+    This is done by concatenating the prompt with the candidate and computing
+    the sum of log probabilities for the candidate tokens.
+    """
+    # Concatenate prompt and candidate text
+    full_text = prompt + candidate
+    # Tokenize full text
+    full_inputs = tokenizer(full_text, return_tensors="pt", truncation=True, max_length=512)
+    if torch.cuda.is_available():
+        full_inputs = {k: v.to('cuda') for k, v in full_inputs.items()}
+    with torch.no_grad():
+        outputs = model(**full_inputs)
+    logits = outputs.logits  # shape: (1, seq_length, vocab_size)
+
+    # Tokenize candidate separately (do not add special tokens)
+    candidate_ids = tokenizer(candidate, add_special_tokens=False, return_tensors="pt").input_ids[0]
+    # Tokenize prompt to determine where candidate tokens begin
+    prompt_ids = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).input_ids[0]
+    prompt_length = prompt_ids.shape[0]
+    
+    total_logprob = 0.0
+    # For each token in the candidate, the probability is computed from the logits at position (prompt_length - 1 + i)
+    # because the model predicts token i using the context up to token i-1.
+    for i, token_id in enumerate(candidate_ids):
+        pos = prompt_length - 1 + i
+        token_logits = logits[0, pos, :]
+        log_probs = torch.log_softmax(token_logits, dim=-1)
+        total_logprob += log_probs[token_id].item()
+    return total_logprob
+
 def predict_single_email(model, tokenizer, text):
-    """Make prediction for a single email"""
+    """Make prediction for a single email by extracting probabilities from a causal LM"""
     prompt = f"""
 You are a specialized phishing detection model. Analyze the following email content and determine if it is a phishing attempt.
 
@@ -67,31 +113,23 @@ EMAIL CONTENT:
 {text}
 
 ANSWER (TRUE/FALSE):"""
+    # Compute log-likelihood for each candidate
+    logp_true = compute_candidate_logprob(model, tokenizer, prompt, "TRUE")
+    logp_false = compute_candidate_logprob(model, tokenizer, prompt, "FALSE")
     
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+    # Convert log-likelihoods to probabilities via softmax
+    p_true = math.exp(logp_true)
+    p_false = math.exp(logp_false)
+    total = p_true + p_false
+    prob_true = p_true / total
+    threshold_log_odds = math.log(0.999 / (1 - 0.999))
     
-    if torch.cuda.is_available():
-        inputs = {k: v.to('cuda') for k, v in inputs.items()}
-
-    with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=1,
-            do_sample=False,  # More deterministic
-            num_beams=3,     # Beam search
-            early_stopping=True,
-            top_p=1.0        # Set top_p to default value
-        )
+    predicted_label = 1 if (logp_true - logp_false) >= threshold_log_odds else 0
     
-    pred_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    # Optionally, print the computed probabilities for debugging
+    print(f"Computed probabilities -> TRUE: {prob_true:.4f}, FALSE: {1-prob_true:.4f}")
     
-    # Improved response parsing
-    pred_text = pred_text.upper().strip()
-    if pred_text.endswith('TRUE'):
-        return 1, 0.9
-    elif pred_text.endswith('FALSE'):
-        return 0, 0.1
-    return 0, 0.5  # Default case
+    return predicted_label, prob_true
 
 def evaluate_model(model, tokenizer, texts):
     """Evaluate model with progress bar"""
@@ -110,8 +148,38 @@ def evaluate_model(model, tokenizer, texts):
     
     return predictions, predicted_probs
 
+def plot_confusion_matrix(conf_matrix, output_dir):
+    """Plot and save confusion matrix"""
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['Valid', 'Phishing'],
+                yticklabels=['Valid', 'Phishing'])
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.savefig(f'{output_dir}/confusion_matrix.png')
+    plt.close()
+
+def plot_roc_curve(true_labels, predicted_probs, roc_auc, output_dir):
+    """Plot and save ROC curve"""
+    fpr, tpr, _ = roc_curve(true_labels, predicted_probs)
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend(loc="lower right")
+    plt.savefig(f'{output_dir}/roc_curve.png')
+    plt.close()
+
 def main():
     try:
+        # Login to Hugging Face
+        login_hugging_face()
+        
         # Load model and data
         model, tokenizer = load_model_and_tokenizer()
         
@@ -160,33 +228,6 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}")
         raise
-
-def plot_confusion_matrix(conf_matrix, output_dir):
-    """Plot and save confusion matrix"""
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['Valid', 'Phishing'],
-                yticklabels=['Valid', 'Phishing'])
-    plt.title('Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.savefig(f'{output_dir}/confusion_matrix.png')
-    plt.close()
-
-def plot_roc_curve(true_labels, predicted_probs, roc_auc, output_dir):
-    """Plot and save ROC curve"""
-    fpr, tpr, _ = roc_curve(true_labels, predicted_probs)
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve')
-    plt.legend(loc="lower right")
-    plt.savefig(f'{output_dir}/roc_curve.png')
-    plt.close()
 
 if __name__ == '__main__':
     main()
